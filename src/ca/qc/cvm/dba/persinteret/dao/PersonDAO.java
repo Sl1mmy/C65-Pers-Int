@@ -3,11 +3,13 @@ package ca.qc.cvm.dba.persinteret.dao;
 import java.text.DateFormat;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.List;
+import java.util.*;
 import java.util.regex.Pattern;
 
+import com.sleepycat.je.Database;
+import com.sleepycat.je.DatabaseEntry;
+import com.sleepycat.je.LockMode;
+import com.sleepycat.je.OperationStatus;
 import org.bson.Document;
 import org.bson.types.Binary;
 
@@ -18,80 +20,169 @@ import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 
 import ca.qc.cvm.dba.persinteret.entity.Person;
+import org.neo4j.driver.Session;
+import org.neo4j.driver.StatementResult;
+import org.neo4j.driver.Record;
+import org.neo4j.driver.Value;
+
+import javax.xml.crypto.Data;
 
 public class PersonDAO {
 
 /**
-	 * Méthode permettant de retourner la liste des personnes de la base de données.
+	 * Mï¿½thode permettant de retourner la liste des personnes de la base de donnï¿½es.
 	 * 
 	 * Notes importantes:
-	 * - N'oubliez pas de limiter les résultats en fonction du paramètre limit
-	 * - La liste doit être triées en ordre croissant, selon les noms des personnes
-	 * - Le champ de filtre doit permettre de filtrer selon le préfixe du nom (insensible à la casse)
-	 * - Si le champ withImage est à false, alors l'image (byte[]) n'a pas à faire partie des résultats
+	 * - N'oubliez pas de limiter les rï¿½sultats en fonction du paramï¿½tre limit
+	 * - La liste doit ï¿½tre triï¿½es en ordre croissant, selon les noms des personnes
+	 * - Le champ de filtre doit permettre de filtrer selon le prï¿½fixe du nom (insensible ï¿½ la casse)
+	 * - Si le champ withImage est ï¿½ false, alors l'image (byte[]) n'a pas ï¿½ faire partie des rï¿½sultats
 	 * - N'oubliez pas de mettre l'ID dans la personne, car c'est utile pour savePerson()
 	 * - Il pourrait ne pas y avoir de filtre (champ filtre vide)
 	 *  
-	 * @param filterText champ filtre, peut être vide ou null
-	 * @param withImage true si l'image est nécessaire, false sinon.
-	 * @param limit permet de restreindre les résultats
-	 * @return la liste des personnes, selon le filtre si nécessaire et filtre
+	 * @param filterText champ filtre, peut ï¿½tre vide ou null
+	 * @param withImage true si l'image est nï¿½cessaire, false sinon.
+	 * @param limit permet de restreindre les rï¿½sultats
+	 * @return la liste des personnes, selon le filtre si nï¿½cessaire et filtre
 	 */
 	public static List<Person> getPeopleList(String filterText, boolean withImage, int limit) {
 		final List<Person> peopleList = new ArrayList<Person>();
-		
+
+		Session session = Neo4jConnection.getConnection();
+		Database connection = BerkeleyConnection.getConnection();
+
+		try {
+			//query
+			Map<String, Object> params = new HashMap<String, Object>();
+			params.put("filterText", filterText != null ? filterText.toLowerCase() : "");
+			params.put("limit", limit);
+
+			String query = String.format(
+					"MATCH (a:Person) %sRETURN a.name AS name, a.codeName AS codeName, a.status AS status, a.dateOfBirth AS dob, "
+							+ "a.connexions AS connexions, a.imageData AS imageData, id(a) AS id "
+							+ "ORDER BY a.name ASC LIMIT $limit",
+					(filterText != null && !filterText.isEmpty() ? "WHERE a.name STARTS WITH $filterText " : "")
+			);
+
+			StatementResult result = session.run(query, params);
+
+			while (result.hasNext()) {
+				Record record = result.next();
+				List<String> connexions = record.get("connexions").asList(Value::asString);
+
+				byte[] retData = null;
+				if(withImage) {
+					String key = String.valueOf(record.get("id").asInt());
+					DatabaseEntry theKey = new DatabaseEntry(key.getBytes("UTF-8"));
+					DatabaseEntry theData = new DatabaseEntry();
+
+					if (connection.get(null, theKey, theData, LockMode.DEFAULT) == OperationStatus.SUCCESS) {
+						retData = theData.getData();
+					}
+					//doesnt exist
+				}
+
+
+				Person person = new Person(
+						String.valueOf(record.get("id").asInt()),
+						record.get("name").asString(),
+						record.get("codeName").asString(),
+						record.get("status").asString(),
+						record.get("dob").asString(),
+						connexions,
+						retData
+				);
+
+				peopleList.add(person);
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+
 		return peopleList;
 	}
 
 	/**
-	 * Méthode permettant de sauvegarder une personne
+	 * Mï¿½thode permettant de sauvegarder une personne
 	 * 
 	 * Notes importantes:
-	 * - Si le champ "id" n'est pas null, alors c'est une mise à jour, pas une insertion
+	 * - Si le champ "id" n'est pas null, alors c'est une mise ï¿½ jour, pas une insertion
 	 * - Le nom de code est optionnel, le reste est obligatoire
-	 * - Le nom de la personne doit être unique
-	 * - Regarder comment est fait la classe Personne pour avoir une idée des données à sauvegarder
-	 * - Pour cette méthode, dénormaliser pourrait vous être utile. La performance des lectures est vitale.
+	 * - Le nom de la personne doit ï¿½tre unique
+	 * - Regarder comment est fait la classe Personne pour avoir une idï¿½e des donnï¿½es ï¿½ sauvegarder
+	 * - Pour cette mï¿½thode, dï¿½normaliser pourrait vous ï¿½tre utile. La performance des lectures est vitale.
 	 * - Je vous conseille de sauvegarder la date de naissance en format long (en millisecondes)
-	 * - Une connexion va dans les deux sens. Plus préçisément, une personne X qui connait une autre personne Y
-	 *   signifie que cette dernière connait la personne X
+	 * - Une connexion va dans les deux sens. Plus prï¿½ï¿½isï¿½ment, une personne X qui connait une autre personne Y
+	 *   signifie que cette derniï¿½re connait la personne X
 	 * - Attention, les connexions d'une personne pourraient changer avec le temps (ajout/suppression)
 	 * - N'oubliez pas de sauvegarder votre image dans BerkeleyDB
 	 * 
 	 * @param person
-	 * @return true si succès, false sinon
+	 * @return true si succï¿½s, false sinon
 	 */
 	public static boolean save(Person person) {
+		boolean success = false;
+		Session session = Neo4jConnection.getConnection();
+		Database connection = BerkeleyConnection.getConnection();
+		try {
+			//TODO : CHECK SI PERSONNE EXISTE DEJA (POUR MODIFICATION)
+
+			Map<String, Object> params = new HashMap<String, Object>();
+			//params.put("p1", person.getId());
+			params.put("p1", person.getName());
+			params.put("p2", person.getCodeName());
+			params.put("p3", person.getDateOfBirth());
+			params.put("p4", person.getStatus());
+			params.put("p5", person.getConnexions());
+			StatementResult result = session.run("CREATE (a:Person {name: $p1, codeName: $p2, dateOfBirth: $p3, status: $p4, connexions: $p5}) RETURN id(a) as id", params);
+
+			if (result.hasNext()) {
+				Record record = result.next();
+				int keyInt = record.get("id").asInt();
+				String key = String.valueOf(keyInt);
+
+				// AJOUTER IMAGE:
+				byte[] data = person.getImageData();
+
+				DatabaseEntry theKey = new DatabaseEntry(key.getBytes("UTF-8"));
+				DatabaseEntry theData = new DatabaseEntry(data);
+				connection.put(null, theKey, theData);
+			}
+
+			success = true;
+		}
+		catch (Exception e) {
+			e.printStackTrace();
+		}
+
+		return success;
+	}
+	
+	/**
+	 * Suppression des donnï¿½es/fiche d'une personne
+	 * 
+	 * @param person
+	 * @return true si succï¿½s, false sinon
+	 */
+	public static boolean delete(Person person) {
 		boolean success = false;
 		
 		return success;
 	}
 	
 	/**
-	 * Suppression des données/fiche d'une personne
+	 * Suppression totale de toutes les donnï¿½es du systï¿½me!
 	 * 
-	 * @param person
-	 * @return true si succès, false sinon
-	 */
-	public static boolean delete(Person person) {
-		boolean success = true;
-		
-		return success;
-	}
-	
-	/**
-	 * Suppression totale de toutes les données du système!
-	 * 
-	 * @return true si succès, false sinon
+	 * @return true si succï¿½s, false sinon
 	 */
 	public static boolean deleteAll() {
-		boolean success = true;
+		boolean success = false;
 
 		return success;
 	}
 	
 	/**
-	 * Méthode qui retourne le ratio de personnes en liberté par rapport au nombre total de fiches.
+	 * Mï¿½thode qui retourne le ratio de personnes en libertï¿½ par rapport au nombre total de fiches.
 	 * 
 	 * @return ratio entre 0 et 100
 	 */
@@ -102,7 +193,7 @@ public class PersonDAO {
 	}
 	
 	/**
-	 * Nombre de photos actuellement sauvegardées dans le système
+	 * Nombre de photos actuellement sauvegardï¿½es dans le systï¿½me
 	 * @return nombre
 	 */
 	public static long getPhotoCount() {
@@ -110,7 +201,7 @@ public class PersonDAO {
 	}
 	
 	/**
-	 * Nombre de fiches présente dans la base de données
+	 * Nombre de fiches prï¿½sente dans la base de donnï¿½es
 	 * @return nombre
 	 */
 	public static long getPeopleCount() {
@@ -118,7 +209,7 @@ public class PersonDAO {
 	}
 		
 	/**
-	 * Permet de savoir la personne la plus jeune du système
+	 * Permet de savoir la personne la plus jeune du systï¿½me
 	 * 
 	 * @return nom de la personne
 	 */
@@ -127,9 +218,9 @@ public class PersonDAO {
 	}
 	
 	/**
-	 * Afin de savoir la prochaine personne à investiguer,
+	 * Afin de savoir la prochaine personne ï¿½ investiguer,
 	 * Il faut retourner la personne qui connait, ou est connu, du plus grand nombre de personnes 
-	 * disparues ou décédées (morte). Cette personne doit évidemment avoir le statut "Libre"
+	 * disparues ou dï¿½cï¿½dï¿½es (morte). Cette personne doit ï¿½videmment avoir le statut "Libre"
 	 * 
 	 * @return nom de la personne
 	 */
@@ -139,9 +230,9 @@ public class PersonDAO {
 	}
 	
 	/**
-	 * Permet de retourner, l'âge moyen des personnes
+	 * Permet de retourner, l'ï¿½ge moyen des personnes
 	 * 
-	 * @return par exemple, 20 (si l'âge moyen est 20 années arrondies)
+	 * @return par exemple, 20 (si l'ï¿½ge moyen est 20 annï¿½es arrondies)
 	 */
 	public static int getAverageAge() {
 		int resultat = 0;
