@@ -6,10 +6,7 @@ import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.regex.Pattern;
 
-import com.sleepycat.je.Database;
-import com.sleepycat.je.DatabaseEntry;
-import com.sleepycat.je.LockMode;
-import com.sleepycat.je.OperationStatus;
+import com.sleepycat.je.*;
 import org.bson.Document;
 import org.bson.types.Binary;
 
@@ -61,7 +58,7 @@ public class PersonDAO {
 					"MATCH (a:Person) %sRETURN a.name AS name, a.codeName AS codeName, a.status AS status, a.dateOfBirth AS dob, "
 							+ "a.connexions AS connexions, a.imageData AS imageData, id(a) AS id "
 							+ "ORDER BY a.name ASC LIMIT $limit",
-					(filterText != null && !filterText.isEmpty() ? "WHERE a.name STARTS WITH $filterText " : "")
+					(filterText != null && !filterText.isEmpty() ? "WHERE toLower(a.name) STARTS WITH $filterText " : "")
 			);
 
 			StatementResult result = session.run(query, params);
@@ -125,20 +122,33 @@ public class PersonDAO {
 		Session session = Neo4jConnection.getConnection();
 		Database connection = BerkeleyConnection.getConnection();
 		try {
-			//TODO : CHECK SI PERSONNE EXISTE DEJA (POUR MODIFICATION)
+			String nodeId = person.getId(); // Assuming getId() fetches the internal Neo4j ID
 
 			Map<String, Object> params = new HashMap<String, Object>();
-			//params.put("p1", person.getId());
 			params.put("p1", person.getName());
 			params.put("p2", person.getCodeName());
 			params.put("p3", person.getDateOfBirth());
 			params.put("p4", person.getStatus());
 			params.put("p5", person.getConnexions());
-			StatementResult result = session.run("CREATE (a:Person {name: $p1, codeName: $p2, dateOfBirth: $p3, status: $p4, connexions: $p5}) RETURN id(a) as id", params);
 
+			String cypherQuery;
+			if (nodeId != null) {
+				// Node exists, update it
+				int nodeIdInt = Integer.parseInt(nodeId);
+				cypherQuery = "MATCH (a) WHERE id(a) = $nodeId " +
+						"SET a.name = $p1, a.codeName = $p2, a.dateOfBirth = $p3, a.status = $p4, a.connexions = $p5 " +
+						"RETURN id(a) as id";
+				params.put("nodeId", nodeIdInt);
+			} else {
+				// Node does not exist, create it
+				cypherQuery = "CREATE (a:Person {name: $p1, codeName: $p2, dateOfBirth: $p3, status: $p4, connexions: $p5}) " +
+						"RETURN id(a) as id";
+			}
+			StatementResult result = session.run(cypherQuery, params);
+			int keyInt = 0;
 			if (result.hasNext()) {
 				Record record = result.next();
-				int keyInt = record.get("id").asInt();
+				keyInt = record.get("id").asInt();
 				String key = String.valueOf(keyInt);
 
 				// AJOUTER IMAGE:
@@ -147,6 +157,15 @@ public class PersonDAO {
 				DatabaseEntry theKey = new DatabaseEntry(key.getBytes("UTF-8"));
 				DatabaseEntry theData = new DatabaseEntry(data);
 				connection.put(null, theKey, theData);
+			}
+			params.put("nodeId", keyInt);
+			session.run("MATCH (a:Person)-[r:CONNEXION]->(b:Person) WHERE id(a) = $nodeId DELETE r",params);
+			if (!person.getConnexions().isEmpty()) {
+				for (String connName : person.getConnexions()) {
+					params.put("connName", connName);
+					session.run("MATCH (a:Person), (b:Person) WHERE id(a) = $nodeId AND b.name = $connName "
+									+ "MERGE (a)-[:CONNEXION]->(b)",params);
+				}
 			}
 
 			success = true;
@@ -166,6 +185,25 @@ public class PersonDAO {
 	 */
 	public static boolean delete(Person person) {
 		boolean success = false;
+		Session session = Neo4jConnection.getConnection();
+		Database connection = BerkeleyConnection.getConnection();
+		try {
+			String nodeId = person.getId();
+
+			if (nodeId != null) {
+				// Delete the node and all its connected relationships
+				int nodeIdInt = Integer.parseInt(nodeId);
+				Map<String, Object> params = new HashMap<String, Object>();
+				params.put("nodeId", nodeIdInt);
+				session.run("MATCH (a:Person) WHERE id(a) = $nodeId DETACH DELETE a", params);
+				DatabaseEntry theKey = new DatabaseEntry(nodeId.getBytes("UTF-8"));
+				connection.delete(null, theKey);
+
+				success = true;
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
 		
 		return success;
 	}
@@ -177,6 +215,38 @@ public class PersonDAO {
 	 */
 	public static boolean deleteAll() {
 		boolean success = false;
+		Session session = Neo4jConnection.getConnection();
+		Database connection = BerkeleyConnection.getConnection();
+
+		Cursor myCursor = null;
+		Transaction txn = null;
+
+		try {
+			txn = connection.getEnvironment().beginTransaction(null, null);
+			myCursor = connection.openCursor(txn, null);
+			try{
+			DatabaseEntry foundKey = new DatabaseEntry();
+			DatabaseEntry foundData = new DatabaseEntry();
+
+			while (myCursor.getNext(foundKey, foundData, LockMode.DEFAULT) == OperationStatus.SUCCESS) {
+				myCursor.delete();  // Delete each record one by one
+			}
+			// Delete all
+		} finally {
+			myCursor.close();  // Ensure the cursor is closed within the try-finally block
+		}
+
+			txn.commit();
+			session.run("MATCH (n) OPTIONAL MATCH (n)-[r]-() DELETE n,r");
+			success = true;
+		} catch (Exception e) {
+			if (txn != null) {
+				txn.abort(); // Abort the transaction on error
+			}
+			e.printStackTrace();
+		} finally {
+
+		}
 
 		return success;
 	}
@@ -187,9 +257,27 @@ public class PersonDAO {
 	 * @return ratio entre 0 et 100
 	 */
 	public static int getFreeRatio() {
-		int num = 0;
+		Session session = Neo4jConnection.getConnection();
+		try {
+			// Exécutez une requête pour compter le total de personnes et celles en liberté
+			StatementResult result = session.run("MATCH (p:Person) RETURN count(p) as total, sum(CASE WHEN p.status = 'Libre' THEN 1 ELSE 0 END) as libre");
+
+			if (result.hasNext()) {
+				Record record = result.next();
+				int total = record.get("total").asInt();
+				int libre = record.get("libre").asInt();
+
+				// Pour éviter la division par zéro
+				if (total > 0) { // Pour éviter la division par zéro
+					return (int) Math.round(100.0 * libre / total); // Calculer le pourcentage puis arrondir
+				}
+
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
 		
-		return num;
+		return 0;
 	}
 	
 	/**
@@ -197,7 +285,23 @@ public class PersonDAO {
 	 * @return nombre
 	 */
 	public static long getPhotoCount() {
-		return 0;
+		int photoCount = 0;
+		Cursor myCursor = null;
+		Database connection = BerkeleyConnection.getConnection();
+		try {
+			myCursor = connection.openCursor(null, null);
+			DatabaseEntry foundKey = new DatabaseEntry();
+			DatabaseEntry foundData = new DatabaseEntry();
+			while (myCursor.getNext(foundKey, foundData, LockMode.DEFAULT) == OperationStatus.SUCCESS) {
+				photoCount++;
+			}
+		} finally {
+			if (myCursor != null) {
+				myCursor.close();
+			}
+		}
+
+		return photoCount;
 	}
 	
 	/**
@@ -205,6 +309,25 @@ public class PersonDAO {
 	 * @return nombre
 	 */
 	public static long getPeopleCount() {
+
+		Session session = Neo4jConnection.getConnection();
+		try {
+			// Exécutez une requête pour compter le total de personnes et celles en liberté
+			StatementResult result = session.run("MATCH (p:Person) RETURN count(p) as total");
+
+			if (result.hasNext()) {
+				Record record = result.next();
+				int total = record.get("total").asInt();
+
+				// Pour éviter la division par zéro
+				if (total > 0) { // Pour éviter la division par zéro
+					return total; // Calculer le pourcentage puis arrondir
+				}
+
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
 		return 0;
 	}
 		
@@ -214,6 +337,18 @@ public class PersonDAO {
 	 * @return nom de la personne
 	 */
 	public static String getYoungestPerson() {
+		Session session = Neo4jConnection.getConnection();
+		try {
+			// Exécutez une requête pour compter le total de personnes et celles en liberté
+			StatementResult result = session.run("MATCH (p:Person) RETURN p.name AS name ORDER BY p.dateOfBirth DESC LIMIT 1");
+
+			if (result.hasNext()) {
+				Record record = result.next();
+				return record.get("name").asString();
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
 		return "--";
 	}
 	
@@ -225,7 +360,21 @@ public class PersonDAO {
 	 * @return nom de la personne
 	 */
 	public static String getNextTargetName() {
-		
+		Session session = Neo4jConnection.getConnection();
+		try {
+			// Exécutez une requête pour compter le total de personnes et celles en liberté
+			StatementResult result = session.run("MATCH (p:Person {status: 'Libre'})-[:CONNEXION]-(m:Person) " +
+					"WHERE m.status IN ['Disparu', 'Mort'] " +
+					"WITH p, COUNT(m) AS connectedCount " +
+					"RETURN p.name AS name, connectedCount " +
+					"ORDER BY connectedCount DESC LIMIT 1");
+			if (result.hasNext()) {
+				Record record = result.next();
+				return record.get("name").asString();
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
 		return "--";
 	}
 	
@@ -236,6 +385,19 @@ public class PersonDAO {
 	 */
 	public static int getAverageAge() {
 		int resultat = 0;
+		Session session = Neo4jConnection.getConnection();
+		try {
+			StatementResult result = session.run("MATCH (p:Person) WHERE p.dateOfBirth IS NOT NULL " +
+					"RETURN round(avg(date().year - date(p.dateOfBirth).year)) AS averageAge");
+			if (result.hasNext()) {
+				Value value = result.single().get("averageAge");
+				if (!value.isNull()) {
+					resultat = value.asInt();
+				}
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
 		return resultat;
 	}
 }
