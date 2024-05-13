@@ -191,7 +191,6 @@ public class PersonDAO {
 			String nodeId = person.getId();
 
 			if (nodeId != null) {
-				// Delete the node and all its connected relationships
 				int nodeIdInt = Integer.parseInt(nodeId);
 				Map<String, Object> params = new HashMap<String, Object>();
 				params.put("nodeId", nodeIdInt);
@@ -229,11 +228,11 @@ public class PersonDAO {
 			DatabaseEntry foundData = new DatabaseEntry();
 
 			while (myCursor.getNext(foundKey, foundData, LockMode.DEFAULT) == OperationStatus.SUCCESS) {
-				myCursor.delete();  // Delete each record one by one
+				myCursor.delete();
 			}
 			// Delete all
 		} finally {
-			myCursor.close();  // Ensure the cursor is closed within the try-finally block
+			myCursor.close();  
 		}
 
 			txn.commit();
@@ -241,7 +240,7 @@ public class PersonDAO {
 			success = true;
 		} catch (Exception e) {
 			if (txn != null) {
-				txn.abort(); // Abort the transaction on error
+				txn.abort(); 
 			}
 			e.printStackTrace();
 		} finally {
@@ -312,16 +311,14 @@ public class PersonDAO {
 
 		Session session = Neo4jConnection.getConnection();
 		try {
-			// Exécutez une requête pour compter le total de personnes et celles en liberté
 			StatementResult result = session.run("MATCH (p:Person) RETURN count(p) as total");
 
 			if (result.hasNext()) {
 				Record record = result.next();
 				int total = record.get("total").asInt();
 
-				// Pour éviter la division par zéro
-				if (total > 0) { // Pour éviter la division par zéro
-					return total; // Calculer le pourcentage puis arrondir
+				if (total > 0) {
+					return total; 
 				}
 
 			}
@@ -339,7 +336,6 @@ public class PersonDAO {
 	public static String getYoungestPerson() {
 		Session session = Neo4jConnection.getConnection();
 		try {
-			// Exécutez une requête pour compter le total de personnes et celles en liberté
 			StatementResult result = session.run("MATCH (p:Person) RETURN p.name AS name ORDER BY p.dateOfBirth DESC LIMIT 1");
 
 			if (result.hasNext()) {
@@ -362,7 +358,6 @@ public class PersonDAO {
 	public static String getNextTargetName() {
 		Session session = Neo4jConnection.getConnection();
 		try {
-			// Exécutez une requête pour compter le total de personnes et celles en liberté
 			StatementResult result = session.run("MATCH (p:Person {status: 'Libre'})-[:CONNEXION]-(m:Person) " +
 					"WHERE m.status IN ['Disparu', 'Mort'] " +
 					"WITH p, COUNT(m) AS connectedCount " +
