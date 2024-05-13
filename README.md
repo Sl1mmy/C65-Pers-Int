@@ -16,6 +16,6 @@ En résumé, Neo4j offre les fonctionnalités dont nous avons besoin pour notre 
 - **Connexion** : pour représenter les relations entre personnes
 
 ### Indexes: 
-- **Person - Status** : Pour les requêtes concernant le status de la personne (pourcentage en liberté / fiche)
-- **Person - DateOfBirth** : Pour les requêtes concernant l'age d'une personne (la plus jeune / age moyen / fiche)
-- **Connexions entre personnes**: Pour les requêtes concernant les connexions entre personnes (personne cible / fiche)
+- **Person - Status** : Pour les requêtes concernant le status de la personne (pourcentage en liberté / fiche)          **Ordre** : asc - **Type** : Unique
+- **Person - DateOfBirth** : Pour les requêtes concernant l'age d'une personne (la plus jeune / age moyen / fiche)      **Ordre** : asc - **Type** : Unique
+- **Connexions entre personnes**: Pour les requêtes concernant les connexions entre personnes (personne cible / fiche)  **Ordre** : asc - **Type** : Unique
